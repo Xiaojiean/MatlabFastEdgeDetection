@@ -1,10 +1,10 @@
 # MatlabFastEdgeDetection
 Fast Detection of Faint Curved Edges in Noisy Images
 
-1) Set up c++ compiler for Matlab
-2) Compile the code on your machine with compile.m
-3) Run demo.m
-4) Try the code on your image
+- Set up c++ compiler for Matlab
+- Compile the code on your machine with compile.m
+- Run demo.m
+- Try the code on your image
 
 Notes:
 - Work only on 64bit machine, for 32bit machine, replace open libraries.
