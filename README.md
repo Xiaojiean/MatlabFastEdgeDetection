@@ -7,7 +7,7 @@ Fast Detection of Faint Curved Edges in Noisy Images
 - Try the code on your image
 
 Notes:
-- Work only on 64bit machine, for 32bit machine, replace open libraries.
-- Work only on squared images, a new version that works on any image size will be published soon
+- Work only on 64bit machine, for 32bit machine, replace opencv libraries.
+- Work only on squared images, a new version that works on any image size will be published soon.
 
 Good Luck!
