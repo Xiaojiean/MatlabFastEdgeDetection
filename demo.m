@@ -3,7 +3,7 @@ clear;
 close all;
 
 tic;
-imStr = 'Sqr.png';
+imStr = 'real.png';
 prm = getPrm();
 I = im2double(imread(imStr));
 %I = imresize(I,[200 250]);
