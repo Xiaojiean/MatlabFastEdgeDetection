@@ -23,12 +23,9 @@ typedef struct MyParam{
 	double removeEpsilon = 0.248;
 	double maxTurn = 35;
 	double nmsFact = 0.75;
-	int splitPoints = 20;
+	int splitPoints = 40;
 	uint minContrast = 8;
-	uint maxNumOfEdges = 200;
-	double sigma = 0.1;
-	uint patchSize = 10;
-	bool parallel = true;
+	uint maxNumOfEdges = 100;
 
 	void function(const Mat& x, const Mat& y, const Mat& dst){
 		assert(x.size() == y.size());
@@ -39,11 +36,25 @@ typedef struct MyParam{
 		Mat m3 = (m1+m2);
 		m3.copyTo(dst);
 	}
+	uint w = 2;
+	double sigma = 0.1;
+	uint patchSize = 5;
+	bool parallel = true;
 } MyParam;
 
+typedef struct Bottom{
+	Mat lineVec;
+	Mat leftVec;
+	Mat rightVec;
+	Mat lengthVec;
+	Mat p0;
+	Mat p1;
+	Mat indices;
+} Bottom;
+
 typedef struct Handle{
-	uint m;
 	uint n;
+	uint m;
 	uint N;
 	Mat S;
 	Size rSize;
@@ -56,39 +67,43 @@ typedef struct Handle{
 	uint I0S0 = 6;
 	uint S0I1 = 7;	
 	uint TOTAL = 8;
+
 } Handle;
 
+typedef struct Container{
+	Mat S;
+	Mat I;
+} Container;
 
 class Detector {
 	private:
 		Mat _I;
-		Mat _dX;
-		Mat _dY;
 		Mat _E;
-		uint _w;
-		Mat _filter;
 		MyParam _prm;
+		Bottom _bot;
 		Handle _handle;
+		uint _pBig;
 		unordered_map<uint, Mat>* _data;
 		Mat* _pixelScores;
 		unordered_map<uint, Mat> _pixels;
+		Container* _cArr;
 		bool _debug = false;
 		std::mutex _mtx;
-		uint _maxLevel;
 
 		/* Bottom Level Processing */
-		void getBottomLevelSimple(Mat& S, uint index);
-		int getLine(int x0, int y0, int x1, int y1, Mat& P);
-		void getVerticesFromPatchIndices(uint e, uint  v, uint m, uint n, uint& x, uint& y);
+		void extractBottomLevelData();
+		void getBottomLevel(Container& c, uint index);
+		int getLine(uint n, int x0, int y0, int x1, int y1, Mat& P);
+		void getVerticesFromPatchIndices(uint e, uint  v, uint n, uint& x, uint& y);
 
 		/* Core Functions*/
 		void getBestSplittingPoints(Mat& split, Mat& dst, uint index);
 		void threshold(Mat& L, Mat& t);
-		void mergeTilesSimple(const Mat& S1, const Mat& S2, uint index, uint level, bool verticalSplit);
+		void mergeTilesSimple(const Mat& S1, const Mat& S2, uint index, uint level);
 		void findBestResponse(Mat& edge1, Mat& split, Mat& edge2, unordered_map<uint, Mat>& data1, unordered_map<uint, Mat>& data2, uint index, uint level);
 
 		/* Sub Functions */
-		void subIm(const Mat& Ssrc, uint x0, uint y0, uint x1, uint y1, Mat& Sdst);
+		void subIm(const Container& cSrc, uint x0, uint y0, uint x1, uint y1, uint w, Container& cDst);
 		void getEdgeIndices(const Mat& S, vector<Mat>& v);
 		void assignNewPixelScores(Mat& resp, Mat& ind0, Mat& ind1, uint index);
 		void putValuesInMat(Mat& resp, Mat& len, Mat& con, Mat& scores, Mat& minC, Mat& maxC, Mat& i0s0, Mat& s0i1, Mat& dest);
@@ -98,8 +113,6 @@ class Detector {
 		void addIndices(Mat& table, Mat& ind0, Mat& s0, Mat& ind1);
 		bool angleInRange(uint ind0, uint s0, uint ind1, uint level);
 		bool angleInRange(double ang0, double ang1, uint level);
-		double getThreshold(double len){ return _prm.sigma*sqrt(2 * log(6 * _handle.N) / _w / len / 2)+0.03;};
-		uint getSideLength(uint m, uint n, uint e);
 
 		/* Post Processing */
 		void getScores();
@@ -107,7 +120,7 @@ class Detector {
 		bool addEdge(unordered_map<uint, Mat>& data, uint curKey, Mat& E, uint level);
 
 	public:
-		Detector(Mat& I, MyParam& prm);
+		Detector(Mat I, MyParam prm);
 		~Detector();
 		Mat runIm();
 		Mat getE(){ return _E;};
@@ -116,5 +129,5 @@ class Detector {
 			P = P / maxValue(P);
 			return _pixelScores[0];
 		};
-		void beamCurves(uint index, uint level, Mat* S);
+		void beamCurves(uint index, uint level, Container* c);
 };

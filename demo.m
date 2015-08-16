@@ -3,9 +3,14 @@ clear;
 close all;
 
 tic;
+imStr = 'Sqr.png';
 prm = getPrm();
-I = imread('Sines.png');
-E = runIm(I,prm);
+I = im2double(imread(imStr));
+%I = imresize(I,[200 250]);
+if ndims(I) == 3
+    I = rgb2gray(I);
+end
+E = runIm(imStr,prm);
 E = E./max(E(:));
 figure;
 subplot(1,2,1);

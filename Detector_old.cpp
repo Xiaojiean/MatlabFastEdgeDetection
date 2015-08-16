@@ -9,112 +9,135 @@
 #include <math.h>
 #include <thread>
 
+
 using namespace std;
 using namespace cv;
 
-Detector::Detector(Mat& I, MyParam& prm){
+Detector::Detector(Mat I, MyParam prm){
 	_prm = prm;
-	Mat filter = (Mat_<double>(1, 5) << 1, 1, 0, -1, -1);
 	I.convertTo(_I, TYPE);
-	filter.convertTo(_filter, TYPE);
-	_w = (_filter.size().area() - 1) / 2;
 	_E = Mat(_I.rows, _I.cols, TYPE, ZERO);
-	filter2D(_I, _dX, TYPE, _filter);
-	filter2D(_I, _dY, TYPE, _filter.t());
-	//cout << _filter << endl;
-	//Mat a = abs(_dY);
-	//showImage(a, 1, 3, true);
-	uint m = _I.rows;
-	uint n = _I.cols;
+
+	uint n = _I.rows;
+	uint m = _I.cols;
 	uint N = n*m;
-	_handle.m = m;
 	_handle.n = n;
+	_handle.m = m;
 	_handle.N = N;
-	_prm.patchSize = min(m, n)*5/129;
-	cout << _prm.patchSize << endl;
 	_handle.rSize = Size(_handle.N, _handle.N);
-	int maxSize = (int)ceil(_handle.N / 3.0);
+	uint w = _prm.w;
+	_pBig = _prm.patchSize + 2 * w;
+	uint PBig = (uint)pow(_pBig,2);
+	uint P = (uint)pow(_prm.patchSize,2);
+
+	uint pairs = nchoosek(4, 2)*P;
+	_bot.lineVec = Mat(pairs, P, TYPE, ZERO);
+	_bot.leftVec = Mat(pairs, PBig, TYPE, ZERO);
+	_bot.rightVec = Mat(pairs, PBig, TYPE, ZERO);
+	_bot.lengthVec = Mat(1, pairs, TYPE, MINUS);
+	_bot.p0 = Mat(1, pairs, TYPE, MINUS);
+	_bot.p1 = Mat(1, pairs, TYPE, MINUS);
+	_bot.indices = Mat(pairs, _prm.patchSize, TYPE, MINUS);
+
+	int maxSize = (int)ceil(_handle.N / 8.0);
 	_pixelScores = new Mat[maxSize];
 	_data = new unordered_map<uint, Mat>[maxSize];
+	_cArr = new Container[maxSize];
 }
 
 Detector::~Detector(){
 	delete[] _pixelScores;
 	delete[] _data;
+	delete[] _cArr;
 }
 
 Mat Detector::runIm(){
-	uint m = _handle.m;
 	uint n = _handle.n;
-	//double j = log2(n - 1);
-
-	println("Build Binary Tree");
-	double start = tic();
-	Mat S(_handle.m,_handle.n,TYPE);
-	assert(S.isContinuous());
-	double* p = (double*)S.data;
-	for (int i = 0; i < S.size().area(); ++i){
-		*p++ = i;
+	uint m = _handle.m;
+	double j = log2(n - 1);
+	if (n != m){
+		println("Non square image");
 	}
+	else if (j - floor(j) != 0){
+		println("Image size is not a power of 2 plus 1");
+	}
+	else{
+		println("Extract Bottom Level Data");
+		double start = tic();
+		extractBottomLevelData();
+		toc(start);
+		
+		println("Build Binary Tree");
+		start = tic();
+		Mat S(_handle.n,_handle.n,TYPE);
+		assert(S.isContinuous());
+		double* p = (double*)S.data;
+		for (int i = 0; i < S.size().area(); ++i){
+			*p++ = i;
+		}
 
-	uint w = _w;
-	S.copyTo(_handle.S);
-	beamCurves(0,0,&S);
-	toc(start);
+		uint w = _prm.w;
+		Container c;
+		Mat padded(_I.rows+2*w,_I.cols+2*w,_I.depth());
+		copyMakeBorder(_I, padded, w, w, w, w, IPL_BORDER_REFLECT);
+		padded.copyTo(c.I);
+		S.copyTo(c.S);
+		S.copyTo(_handle.S);
+		beamCurves(0,0,&c);
+		toc(start);
 
-	println("Create Edge Image");
-	start = tic();
-	getScores();
-	toc(start);
+		println("Create Edge Image");
+		start = tic();
+		getScores();
+		toc(start);
+	}
 	return _E;
 }
 
-void Detector::beamCurves(uint index, uint level, Mat* S){
-	uint m = S->rows;
-	uint n = S->cols;
+void Detector::beamCurves(uint index, uint level, Container* c){
+	uint m = c->I.rows;
+	uint n = c->I.cols;
+	uint w = _prm.w;
+	n = n - 2 * w;
+	m = m - 2 * w;
 
-	_pixelScores[index] = Mat(_handle.m, _handle.n, TYPE,ZERO);
+	_pixelScores[index] = Mat(_handle.n, _handle.n, TYPE,ZERO);
 
-	if ( max(m,n) <= _prm.patchSize ){
-		_maxLevel = level;
-		getBottomLevelSimple(*S, index);
+	if (m == _prm.patchSize && n == _prm.patchSize){
+		getBottomLevel(*c, index);
 	}
 	else{
-		Mat S0, S1;
-		bool verticalSplit;
-		if (n>=m) {
-			verticalSplit = true;
-			uint mid = (uint)floor(n / 2);
-			subIm(*S, 0, 0, m-1, mid, S0);
-			subIm(*S, 0, mid, m-1, n-1, S1);
+		Container c0, c1;
+		uint mid = (uint)floor(m / 2);
+		if (m==n){
+			subIm(*c, 0, 0, m-1, mid, w, c0);
+			subIm(*c, 0, mid, m-1, n-1, w, c1);
 		}
-		else {
-			verticalSplit = false;
-			uint mid = (uint)floor(m / 2);
-			subIm(*S, 0, 0, mid, n-1, S0);
-			subIm(*S, mid, 0, m-1, n-1, S1);
+		else if(m>n){
+			subIm(*c, 0, 0, mid, mid, w, c0);
+			subIm(*c, mid, 0, m-1, n-1, w, c1);
 		}
 		
 		uint t[] = { 2 * index + 1, 2 * index + 2 };
-		Mat* SArr[] = { &S0, &S1 };
+		Container* cArr[] = { &c0, &c1 };
 
 		if (_prm.parallel && level%2 == 0){
 			vector<std::thread> tasks;
 			for (uint i = 0; i < 2; ++i)
-				tasks.push_back(std::thread(std::bind(&Detector::beamCurves, this, t[i], level+1, SArr[i])));
+				tasks.push_back(std::thread(std::bind(&Detector::beamCurves, this, t[i], level+1, cArr[i])));
 			
 			for (uint i = 0; i < tasks.size(); ++i)
 				tasks[i].join();
 		}
 		else{
 			for (uint i = 0; i < 2; ++i)
-				beamCurves(t[i], level+1, SArr[i]);
+				beamCurves(t[i], level+1, cArr[i]);
 		}
 		_prm.function(_pixelScores[t[0]], _pixelScores[t[1]], _pixelScores[index]);
 		for (uint i = 0; i < 2; ++i){
 			_pixelScores[t[i]].release();
 		}
-		mergeTilesSimple(S0, S1, index, level, verticalSplit);
+		mergeTilesSimple(c0.S, c1.S, index, level);
 		for (uint i = 0; i < 2; ++i){
 			_data[index].insert(_data[t[i]].begin(), _data[t[i]].end());
 			_data[t[i]].clear();
@@ -126,7 +149,7 @@ void Detector::beamCurves(uint index, uint level, Mat* S){
 	}
 }
 
-void Detector::mergeTilesSimple(const Mat& S1, const Mat& S2, uint index, uint level, bool verticalSplit){
+void Detector::mergeTilesSimple(const Mat& S1, const Mat& S2, uint index, uint level){
 
 	uint index1 = 2 * index + 1;
 	uint index2 = 2 * index + 2;
@@ -139,7 +162,7 @@ void Detector::mergeTilesSimple(const Mat& S1, const Mat& S2, uint index, uint l
 
 	vector<std::thread> tasks;
 
-	if (verticalSplit){
+	if (S1.rows != S1.cols){
 		getBestSplittingPoints(edgeS1[2], split, index);
 
 		for (int i = 0; i < 4; ++i){
@@ -203,9 +226,9 @@ void Detector::findBestResponse(Mat& edge1, Mat& split, Mat& edge2, unordered_ma
 				assert(len1 >=1 && len2>=1);
 				double resp = resp1 + resp2;
 				double con;
-				if (_w == 0) con = resp/len;
-				else con = resp/len/2/_w;
-				double thresh = getThreshold(len);
+				if (_prm.w == 0) con = resp/len;
+				else con = resp/len/2/_prm.w;
+				double thresh = _prm.sigma*sqrt(2 * log(6 * _handle.N) / _prm.w / len / 2);
 				double score = abs(con) - thresh;
 
 				if (score > bestScore || bestS0<0){
@@ -297,138 +320,79 @@ void Detector::getEdgeIndices(const Mat& S, vector<Mat>& v){
 	v.push_back(S.row(m - 1).clone());
 }
 
-void Detector::subIm(const Mat& Ssrc, uint x0, uint y0, uint x1, uint y1, Mat& Sdst){
-	Sdst = Ssrc(Range(x0,x1+1), Range(y0,y1+1)).clone();
+void Detector::subIm(const Container& cSrc, uint x0, uint y0, uint x1, uint y1, uint w, Container& cDst){
+	cDst.I = cSrc.I(Range(x0,2 * w + x1+1), Range(y0,2 * w + y1+1)).clone();
+	cDst.S = cSrc.S(Range(x0,x1+1), Range(y0,y1+1)).clone();
 }
 
-uint Detector::getSideLength(uint m, uint n, uint e){
-	if (e % 2 == 1)
-		return m;
-	else
-		return n;
-}
+void Detector::getBottomLevel(Container& c, uint index){
+	Mat I = c.I.clone();
+	Mat S = c.S.clone();
 
-void Detector::getBottomLevelSimple(Mat& S, uint index){
-	//cout << S << endl;
-	uint m = S.rows;
-	uint n = S.cols;
-	assert(S.isContinuous());
-	int baseInd = (int)S.at<double>(0,0);
-	int row, col;
-	ind2sub(baseInd, _I.cols, _I.rows, row, col);
-	//cout << _handle.S << endl;
-	//cout << S << endl;
-	//cout << row << "," << col << endl;
-	Mat gx, gy, ss;
-	subIm(_dX, row, col, row+m-1, col+n-1, gx);
-	subIm(_dY, row, col, row+m-1, col+n-1, gy);
-	subIm(_handle.S, row, col, row + m - 1, col + n - 1, ss);
-	//cout << ss << endl;
-	
-	for (uint e0 = 1; e0 <= 3; ++e0){
-		for (uint e1 = e0 + 1; e1 <= 4; ++e1){
-			uint len0 = getSideLength(m, n, e0);
-			for (uint v0 = 0; v0 < len0; ++v0){
-				uint x0, y0;
-				getVerticesFromPatchIndices(e0, v0, m, n, x0, y0);
-				uint len1 = getSideLength(m, n, e1);
-				for (uint v1 = 0; v1 < len1; ++v1){
-					uint x1, y1;
-					getVerticesFromPatchIndices(e1, v1, m, n, x1, y1);
-					uint ind0 = (uint)S.at<double>(x0, y0);
-					uint ind1 = (uint)S.at<double>(x1, y1);
+	uint m = I.rows;
+	uint n = I.cols;
+	uint N = m*n;
+	I = I.reshape(0, N);
 
-					if (ind0 == ind1) continue;
-
-					Mat P(m, n, TYPE, ZERO);
-					// TODO: if expensive, keep line images
-					int len = getLine(x0, y0, x1, y1, P);
-					//cout << P << endl;
-					Mat curIndices;
-					findIndices(P, curIndices);
-					//cout << curIndices << endl;
-					Mat curPixels;
-					curIndices.convertTo(curIndices, TYPE);
-					copyIndices(S, curIndices, curPixels);
-					//cout << curPixels << endl;
-					int dx = x1 - x0;
-					int dy = y1 - y0;
-
-					double respX = sign(dx)*P.dot(gx);
-					double respY = -sign(dy)*P.dot(gy);
-					double resp;
-					if (abs(dx) == abs(dy)){
-						resp = 0.5*(respX + respY); 
-					}
-					else if (abs(dx) > abs(dy)){ 
-						resp = respX;
-					}
-					else{ 
-						resp = respY;
-					}
-					double con = resp/(2 * _w*len);
-					bool good = abs(con) >= (_prm.removeEpsilon*_prm.sigma);
-					if (!good) continue;
-					double minC = con, maxC = con, score;
-					if (len <= 0){
-						score = numeric_limits<double>::min();
-					}
-					else{
-						double thresh = getThreshold(len);
-						score = abs(con) - thresh;
-					}
-
-					double ind01 = (double)sub2ind(_handle.rSize.height, _handle.rSize.width, (int)ind0, (int)ind1);
-					double ind10 = (double)sub2ind(_handle.rSize.height, _handle.rSize.width, (int)ind1, (int)ind0);
-					Mat bestData(_handle.TOTAL, 1, TYPE, ZERO);
-					assert(bestData.isContinuous());
-					double* bd = (double*)bestData.data;
-					bd[_handle.C] = con;
-					bd[_handle.I0S0] = 0;
-					bd[_handle.L] = len;
-					bd[_handle.R] = resp;
-					bd[_handle.S0I1] = 0;
-					bd[_handle.SC] = score;
-					bd[_handle.minC] = con;
-					bd[_handle.maxC] = con;
-
-					Mat bestData2 = bestData.clone();
-					assert(bestData2.isContinuous());
-					double* bd2 = (double*)bestData2.data;
-					bd2[_handle.R] = -bd[_handle.R];
-					bd2[_handle.C] = -bd[_handle.C];
-					bd2[_handle.minC] = -bd[_handle.maxC];
-					bd2[_handle.maxC] = -bd[_handle.minC];
-
-					_data[index].insert(pair<uint, Mat>((uint)ind01, bestData.clone()));
-					_data[index].insert(pair<uint, Mat>((uint)ind10, bestData2.clone()));
-
-					double value = abs(resp);
-					if (value > 0){
-						Mat& px = _pixelScores[index];
-						assert(px.isContinuous());
-						double* p = (double*)px.data;
-						uint i0 = (int)ind0, i1 = (uint)ind1;
-						p[i0] = std::max(p[i0], value);
-						p[i1] = std::max(p[i1], value);
-					}
-
-					std::chrono::milliseconds interval(0);
-					while (true){
-						if (_mtx.try_lock()){
-							break;
-						}
-						else{
-							this_thread::sleep_for(interval);
-						}
-					}
-					_pixels.insert(pair<uint, Mat>((uint)ind01, curPixels.clone()));
-					_pixels.insert(pair<uint, Mat>((uint)ind10, curPixels.clone()));
-					_mtx.unlock();
-				}
-			}
-		}
+	Mat curPixels;
+	copyIndices(S, _bot.indices, curPixels);
+	Mat resp;
+	if (_prm.w == 0){
+		resp = _bot.lineVec *I;
 	}
+	else{
+		resp = (_bot.leftVec - _bot.rightVec)* I;
+	}
+	resp = resp.t();
+	Mat ind0,ind1,len; 
+	copyIndices(S,_bot.p0,ind0);
+	copyIndices(S,_bot.p1,ind1);
+	len = _bot.lengthVec.clone();
+	
+	
+	Mat ind01, ind10, con;
+	matSub2ind(_handle.rSize, ind0, ind1,ind01);
+	matSub2ind(_handle.rSize, ind1, ind0,ind10);
+	if (_prm.w == 0){
+		divide(resp,len,con);
+	}
+	else{
+		divide(resp, 2*_prm.w*len, con);
+	}
+
+	setValueIfTrue(ZERO , con, len <= 0);
+	
+	if (_prm.removeEpsilon > 0){
+		Mat good = abs(con) >= (_prm.removeEpsilon*_prm.sigma);
+		if (sum(good)[0] == 0){
+			return;
+		}
+		keepTrue(con, good, con);
+		keepTrue(len, good, len);
+		keepTrue(resp, good, resp);
+		keepTrue(ind01, good, ind01);
+		keepTrue(ind10, good, ind10);
+		keepTrue(ind0, good, ind0);
+		keepTrue(ind1, good, ind1);
+		keepSelectedRows(curPixels, good, curPixels);
+	}
+	
+	Mat minC = con.clone(), maxC = con.clone(), thresh, scores;
+	threshold(len, thresh);
+	scores = abs(con) - thresh;
+	setValueIfTrue(numeric_limits<double>::min(), scores, len <= 0);
+
+	assignNewPixelScores(resp, ind0, ind1, index);
+	
+	Mat s0 = Mat(resp.size(), TYPE, ZERO);
+	
+	Mat data01,data10; 
+	putValuesInMat(resp, len, con, scores, minC, maxC, s0, s0, data01);
+	Mat respB = -resp, conB = -con, minCB = -maxC, maxCB = -minC;
+	putValuesInMat(respB, len, conB, scores, minCB, maxCB, s0, s0, data10);
+
+	setNewValues(ind01, ind10, data01, data10, index);
+	setNewPixels(ind01, ind10, curPixels);
 }
 
 void Detector::setNewPixels(Mat& ind01, Mat& ind10, Mat& curPixels){
@@ -485,8 +449,8 @@ void Detector::putValuesInMat(Mat& resp, Mat& len, Mat& con, Mat& scores, Mat& m
 void Detector::assignNewPixelScores(Mat& resp, Mat& ind0, Mat& ind1,uint index){
 	Mat values = resp.clone();
 
-	Mat newPixelScores0 = Mat(_handle.m,_handle.n, TYPE, ZERO);
-	Mat newPixelScores1 = Mat(_handle.m, _handle.n, TYPE, ZERO);
+	Mat newPixelScores0 = Mat(_handle.n,_handle.n, TYPE, ZERO);
+	Mat newPixelScores1 = Mat(_handle.n, _handle.n, TYPE, ZERO);
 
 	Mat idx;
 	sortIdx(values, idx, CV_SORT_ASCENDING);
@@ -503,14 +467,77 @@ void Detector::assignNewPixelScores(Mat& resp, Mat& ind0, Mat& ind1,uint index){
 }
 
 void Detector::threshold(Mat& L,Mat& T){
-	uint w = 2 * _w;
+	uint w = 2 * _prm.w;
 	Mat wL = w*L;
 	Mat div; divide(2 * log(6 * _handle.N), wL, div);
 	Mat sq; sqrt(div, sq);
 	T = _prm.sigma*sq;
 }
 
-int Detector::getLine(int x0, int y0, int x1, int y1, Mat& P){
+void Detector::extractBottomLevelData(){
+	uint index = 0;
+	uint pSize = _prm.patchSize;
+	Mat curIndices;
+
+	for (uint e0 = 1; e0 <= 3; ++e0){
+		for (uint e1 = e0 + 1; e1 <= 4; ++e1){
+			for (uint v0 = 0; v0 <pSize; ++v0){
+				uint x0, y0;
+				getVerticesFromPatchIndices(e0, v0, pSize, x0, y0);
+				for (uint v1 = 0; v1 < pSize; ++v1){
+					uint x1, y1;
+					getVerticesFromPatchIndices(e1, v1, pSize, x1, y1);
+					_bot.p0.at<double>(index) = sub2ind(pSize, pSize, x0, y0);
+					_bot.p1.at<double>(index) = sub2ind(pSize, pSize, x1, y1);
+					Mat P(pSize, pSize,TYPE, ZERO);
+					int L = getLine(pSize, x0, y0, x1, y1, P);
+					curIndices.release();
+					findIndices(P, curIndices);
+					curIndices.copyTo(_bot.indices(Range(index, index + 1), Range(0, curIndices.cols)));
+
+					Mat line = P;
+					Mat left(_pBig,_pBig,TYPE,ZERO);
+					Mat right(_pBig,_pBig,TYPE,ZERO);
+
+					int dx = x1 - x0;
+					int dy = y1 - y0;
+
+					if (abs(dx) > abs(dy)){
+						dy = -sign(dx);
+						dx = 0;
+					}
+					else{
+						dx = sign(dy);
+						dy = 0;
+					}
+					dx = sign(dx);
+					dy = sign(dy);
+
+					int x, y;
+					int w = _prm.w;
+					for (int k = 1; k <= w; ++k){
+						x = w + dx*k;
+						y = w + dy*k;
+						right(Range(x, x + pSize), Range(y, y + pSize)) += line;
+						x = w - dx*k; 
+						y = w - dy*k;
+						left(Range(x, x + pSize), Range(y, y + pSize)) += line;
+					}
+
+					right = min(right,1);
+					left = min(left,1);
+					line.reshape(0, 1).copyTo(_bot.lineVec.row(index));
+					left.reshape(0, 1).copyTo(_bot.leftVec.row(index));
+					right.reshape(0, 1).copyTo(_bot.rightVec.row(index));
+					_bot.lengthVec.at<double>(index) = L;
+					index = index + 1;
+				}
+			}
+		}
+	}
+} 
+
+int Detector::getLine(uint n, int x0, int y0, int x1, int y1, Mat& P){
 	int dx = abs(x1 - x0);
 	int dy = abs(y1 - y0);
 	int L = max(dx, dy);
@@ -525,16 +552,14 @@ int Detector::getLine(int x0, int y0, int x1, int y1, Mat& P){
 	int err = dx - dy;
 	bool first = true;
 
-	double corner = 2*0.5;
-
 	while(true){
 		P.at<double>(x0, y0) = 1;
 		if (first){
-			P.at<double>(x0, y0) = corner;
+			P.at<double>(x0, y0) = 0.5;
 			first = false;
 		}
 		if (x0 == x1 && y0 == y1){
-			P.at<double>(x0, y0) = corner;
+			P.at<double>(x0, y0) = 0.5;
 			break;
 		}
 		int e2 = 2 * err;
@@ -550,14 +575,7 @@ int Detector::getLine(int x0, int y0, int x1, int y1, Mat& P){
 	return L;
 }
 
-void Detector::getVerticesFromPatchIndices(uint e, uint  v, uint m, uint n, uint& x, uint& y){
-	/*
-	e is the edge index, v is the vertex index
-	the function converet the pair(e,v) to the coordinates (x,y)
-	e = 1 is the left patch side
-	e = 2 is the up side
-	*/
-
+void Detector::getVerticesFromPatchIndices(uint e, uint  v, uint n, uint& x, uint& y){
 	switch (e){
 	case 1:
 		x = v;
@@ -572,7 +590,7 @@ void Detector::getVerticesFromPatchIndices(uint e, uint  v, uint m, uint n, uint
 		y = n-1;
 		break;
 	case 4:
-		x = m-1;
+		x = n-1;
 		y = v;
 		break;
 	default:
@@ -582,10 +600,9 @@ void Detector::getVerticesFromPatchIndices(uint e, uint  v, uint m, uint n, uint
 }
 
 void Detector::getScores(){
-	uint m = _handle.m;
 	uint n = _handle.n;
 	
-	Mat selected(m,n,BOOL,FALSE);
+	Mat selected(n,n,BOOL,FALSE);
 
 	unordered_map<uint,Mat>& data = _data[0];
 	priority_queue<pair<double,uint>> q;
@@ -593,6 +610,7 @@ void Detector::getScores(){
 	for (it = data.begin(); it != data.end(); ++it){
 		Mat tuple = it->second;
 		double* p = (double*)tuple.data;
+
 
 		double sc = p[_handle.SC], con = p[_handle.C], minC = p[_handle.minC], maxC = p[_handle.maxC];
 		if (sc > 0){
@@ -609,7 +627,7 @@ void Detector::getScores(){
 		double curScore = q.top().first;
 		uint curKey = q.top().second;
 		q.pop();
-		Mat E(m, n, BOOL, FALSE);
+		Mat E(n, n, BOOL, FALSE);
 
 		if (!addEdge(data, curKey, E, 1)){
 			continue;
@@ -685,8 +703,8 @@ void Detector::removeKey(unordered_map<uint, Mat>& data, uint key){
 }
 
 bool Detector::addEdge(unordered_map<uint, Mat>& data, uint curKey, Mat& E, uint level){
-	//int maxLevel = (int)(2*log2(_handle.n)-log2(_prm.patchSize));
-	if (data.count(curKey) == 0 || level == _maxLevel){
+	int maxLevel = (int)(2*log2(_handle.n)-log2(_prm.patchSize));
+	if (data.count(curKey) == 0 || level == maxLevel){
 		return false;
 	}
 	Mat curData = data.at(curKey).clone();
@@ -725,8 +743,8 @@ bool Detector::addEdge(unordered_map<uint, Mat>& data, uint curKey, Mat& E, uint
 }
 
 bool Detector::angleInRange(uint ind0, uint s0, uint ind1, uint level){
-	int ang0 = indToAngle(_handle.m, _handle.n, ind0, s0);
-	int ang1 = indToAngle(_handle.m, _handle.n, s0, ind1);
+	int ang0 = indToAngle(_handle.n, _handle.n, ind0, s0);
+	int ang1 = indToAngle(_handle.n, _handle.n, s0, ind1);
 	return(angleInRange(ang0, ang1, level));
 }
 
@@ -734,9 +752,8 @@ bool Detector::angleInRange(double ang0, double ang1, uint level){
 	int diff = (int)(ang0 - ang1)+360;
 	diff %= 360;
 	assert(diff >= 0 && diff < 360);
-	//double J = floor(log2(_handle.N)) - 2*log2(_prm.patchSize - 1)-1;
-	double J = _maxLevel-1;
-	double curMaxTurn = _prm.maxTurn*(2.0 - (double)level / J);
+	double J = floor(log2(_handle.N)) - 2*log2(_prm.patchSize - 1)-1;
+	double curMaxTurn = _prm.maxTurn*(2 - level / J);
 	assert(curMaxTurn >= _prm.maxTurn && curMaxTurn <= _prm.maxTurn * 2);
 	return (diff <= curMaxTurn) || ((360 - diff) <= curMaxTurn);
 }
